@@ -4,9 +4,11 @@ import User from '../models/user.model.js';
 const router = express.Router();
 
 router.get('/github', (req, res) => {
-    const url = `https://github.com/login/oauth/authorize?client_id=${process.env.GITHUB_CLIENT_ID}&scope=repo,admin:repo_hook`;
+    const redirectUri = "http://localhost:4000/auth/github/callback";
+    const url = `https://github.com/login/oauth/authorize?client_id=${process.env.GITHUB_CLIENT_ID}&redirect_uri=${redirectUri}&scope=repo`;
     res.redirect(url);
 });
+
 
 router.get('/github/callback', async (req, res) => {
     const code = req.query.code;

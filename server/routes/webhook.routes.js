@@ -9,50 +9,72 @@ const router = express.Router();
 function verifySignature(req) {
   const sig = req.headers['x-hub-signature-256'];
   if (!sig) return false;
+
   const hmac = crypto.createHmac('sha256', process.env.WEBHOOK_SECRET);
-  const computed = 'sha256=' + hmac.update(JSON.stringify(req.body)).digest('hex');
-  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(computed));
+  const computed =
+    'sha256=' + hmac.update(req.body).digest('hex'); // ✅ use raw buffer directly
+
+  try {
+    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(computed));
+  } catch {
+    return false;
+  }
 }
 
 router.post('/github', async (req, res) => {
-  // verify signature
   if (!verifySignature(req)) {
     return res.status(401).send('Invalid signature');
+  }
+
+  // ✅ parse JSON after verification
+  let payload;
+  try {
+    payload = JSON.parse(req.body.toString('utf8'));
+  } catch (err) {
+    return res.status(400).send('Invalid JSON');
   }
 
   const event = req.headers['x-github-event'];
   if (event !== 'pull_request') return res.status(200).send('ignored');
 
-  const action = req.body.action;
-  const pr = req.body.pull_request;
-  const owner = req.body.repository.owner.login;
-  const repo = req.body.repository.name;
+  const action = payload.action;
+  const pr = payload.pull_request;
+  const owner = payload.repository.owner.login;
+  const repo = payload.repository.name;
   const prNumber = pr.number;
 
-  // Handle opened, reopened, synchronize (when new commits)
-  if (['opened','reopened','synchronize'].includes(action)) {
+  if (['opened', 'reopened', 'synchronize'].includes(action)) {
     try {
-      // get files changed in PR
       const filesUrl = `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/files`;
-      // NOTE: need a token with repo access: find a user admin/owner token in DB
-      // For simplicity, pick an arbitrary user with repo access (production: track repo->token mapping).
-      const user = await User.findOne({ /* find user who installed hook */ });
+
+      const user = await User.findOne({});
       if (!user) throw new Error('No token found to call GitHub API');
 
-      const filesResp = await axios.get(filesUrl, { headers: { Authorization: `token ${user.accessToken}` }});
-      const files = filesResp.data; // array of files with patch
+      const filesResp = await axios.get(filesUrl, {
+        headers: { Authorization: `token ${user.accessToken}` },
+      });
+      const files = filesResp.data;
 
-      // Gather the diffs / file patches (limit to e.g. first 10 files or 100 KB)
-      const patches = files.slice(0, 10).map(f => ({ filename: f.filename, patch: f.patch || '' }));
+      const patches = files.slice(0, 10).map(f => ({
+        filename: f.filename,
+        patch: f.patch || '',
+      }));
 
-      // Ask Gemini to review
       const reviewText = await reviewPrWithGemini({
-        owner, repo, prNumber, prTitle: pr.title, prBody: pr.body, patches
+        owner,
+        repo,
+        prNumber,
+        prTitle: pr.title,
+        prBody: pr.body,
+        patches,
       });
 
-      // Post comment
       const commentUrl = `https://api.github.com/repos/${owner}/${repo}/issues/${prNumber}/comments`;
-      await axios.post(commentUrl, { body: reviewText }, { headers: { Authorization: `token ${user.accessToken}` }});
+      await axios.post(
+        commentUrl,
+        { body: reviewText },
+        { headers: { Authorization: `token ${user.accessToken}` } }
+      );
 
       return res.status(200).send('review posted');
     } catch (err) {
